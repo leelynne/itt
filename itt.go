@@ -1,15 +1,28 @@
-package main
+package itt
 
 import (
 	"fmt"
 	"os"
+	"sync"
+	"testing"
 
 	"github.com/fsouza/go-dockerclient"
 )
 
-type Tool struct {
-	containers []Container
-	ids        []string
+var client *docker.Client
+var pulledContainers map[string]bool
+
+func init() {
+	endpoint := "unix:///var/run/docker.sock"
+	nclient, err := docker.NewClient(endpoint)
+	if err != nil {
+		panic(err)
+	}
+	client = nclient
+	pulledContainers, err = getLocalContainers()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to pull containers - %s", err.Error()))
+	}
 }
 
 type Container struct {
@@ -17,48 +30,47 @@ type Container struct {
 	PortBindings []string // e.g. 8000:8000. If empty exposes all
 }
 
-func WithContainers(images ...Container) *Tool {
-	endpoint := "unix:///var/run/docker.sock"
-	client, err := docker.NewClient(endpoint)
-	if err != nil {
-		panic(err)
-	}
-	imgs, err := client.ListImages(true)
-	if err != nil {
-		panic(err)
-	}
-	imgMap := make(map[string]bool)
-	for _, img := range imgs {
-		for _, tag := range img.RepoTags {
-			imgMap[tag] = true
+func WithContainers(t *testing.T, names ...string) *Manager {
+	m := Manager{}
+
+	wg := sync.WaitGroup{}
+	pulled := false
+	for _, target := range names {
+		if !pulledContainers[target] {
+			wg.Add(1)
+			pulled = true
+			go func(cName string) {
+				defer wg.Done()
+				t.Logf("Pulling %s\n", cName)
+				req := docker.PullImageOptions{
+					Repository:   cName,
+					OutputStream: os.Stdout,
+				}
+				err := client.PullImage(req, docker.AuthConfiguration{})
+				if err != nil {
+					t.Fatalf("Failed to pull image %s - %s", cName, err.Error())
+				}
+			}(target)
 		}
 	}
-
-	for _, target := range images {
-		if !imgMap[target.Image] {
-			fmt.Printf("Pulling %s\n", target)
-			req := docker.PullImageOptions{
-				Repository:   target.Image,
-				OutputStream: os.Stdout,
-			}
-			err := client.PullImage(req, docker.AuthConfiguration{})
-			if err != nil {
-				panic(err)
-			}
-		} else {
-			fmt.Printf("%s image already present\n", target)
+	wg.Wait()
+	if pulled {
+		newContainers, err := getLocalContainers()
+		if err != nil {
+			t.Fatalf("Failed to get local container list - %s", err.Error())
 		}
+		pulledContainers = newContainers
 	}
 
-	for _, cont := range images {
+	for _, target := range names {
 		req := docker.CreateContainerOptions{
 			Config: &docker.Config{
-				Image: cont.Image,
+				Image: target,
 			},
 		}
 		c, err := client.CreateContainer(req)
 		if err != nil {
-			panic(err)
+			t.Fatalf("Failed to start container %s", target)
 		}
 
 		startConf := &docker.HostConfig{
@@ -68,11 +80,23 @@ func WithContainers(images ...Container) *Tool {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("Started %s:%s", cont.Image, c.ID)
+		m.ids = append(m.ids, c.ID)
+		t.Logf("Started container %s:%s\n", target, c.ID)
 	}
-	return nil
+
+	return &m
 }
 
-func main() {
-	WithContainers(Container{Image: "dockerfile/rethinkdb:latest"}, Container{Image: "aglover/dynamodb-pier:latest"})
+func getLocalContainers() (map[string]bool, error) {
+	imgs, err := client.ListImages(true)
+	if err != nil {
+		return nil, err
+	}
+	imgMap := make(map[string]bool)
+	for _, img := range imgs {
+		for _, tag := range img.RepoTags {
+			imgMap[tag] = true
+		}
+	}
+	return imgMap, nil
 }
