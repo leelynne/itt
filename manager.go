@@ -8,10 +8,13 @@ type Manager struct {
 }
 
 func (m *Manager) Close() {
-	go func() {
+
+	fmt.Printf("Starting close on %d containers\n", len(m.ids))
+	/*
 		for _, id := range m.ids {
-			err := client.StopContainer(id, 100)
-			fmt.Println(err)
-		}
-	}()
+			err := client.KillContainer(docker.KillContainerOptions{ID: id})
+			if err != nil {
+				fmt.Println(err)
+			}
+		}*/
 }

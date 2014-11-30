@@ -3,6 +3,7 @@ package itt
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -27,30 +28,58 @@ func init() {
 
 type Container struct {
 	Image        string
+	Tag          string
 	PortBindings []string // e.g. 8000:8000. If empty exposes all
+	Init         func() error
+}
+
+func (c *Container) id() string {
+	return fmt.Sprintf("%s:%s", c.Image, c.Tag)
 }
 
 func WithContainers(t *testing.T, names ...string) *Manager {
+	fmt.Printf("Num names %d", len(names))
+	var containers []Container
+	for _, name := range names {
+
+		c := Container{}
+		parts := strings.Split(name, ":")
+		c.Image = parts[0]
+		if len(parts) > 1 {
+			c.Tag = parts[1]
+		} else {
+			c.Tag = "latest"
+		}
+		containers = append(containers, c)
+	}
+	return WithContainerCfgs(t, containers...)
+}
+
+func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
+	fmt.Printf("Num containers %d", len(containers))
 	m := Manager{}
 
 	wg := sync.WaitGroup{}
 	pulled := false
-	for _, target := range names {
-		if !pulledContainers[target] {
+	for _, loopC := range containers {
+		fmt.Printf("Id %s\n", loopC.id())
+
+		if have := pulledContainers[loopC.id()]; !have {
 			wg.Add(1)
 			pulled = true
-			go func(cName string) {
+			go func(c Container) {
 				defer wg.Done()
-				t.Logf("Pulling %s\n", cName)
+				t.Logf("Pulling %s\n", c.id())
 				req := docker.PullImageOptions{
-					Repository:   cName,
+					Repository:   c.Image,
 					OutputStream: os.Stdout,
+					Tag:          c.Tag,
 				}
 				err := client.PullImage(req, docker.AuthConfiguration{})
 				if err != nil {
-					t.Fatalf("Failed to pull image %s - %s", cName, err.Error())
+					t.Fatalf("Failed to pull image %s - %s", c.id(), err.Error())
 				}
-			}(target)
+			}(loopC)
 		}
 	}
 	wg.Wait()
@@ -62,26 +91,36 @@ func WithContainers(t *testing.T, names ...string) *Manager {
 		pulledContainers = newContainers
 	}
 
-	for _, target := range names {
-		req := docker.CreateContainerOptions{
-			Config: &docker.Config{
-				Image: target,
-			},
-		}
-		c, err := client.CreateContainer(req)
-		if err != nil {
-			t.Fatalf("Failed to start container %s", target)
-		}
-
-		startConf := &docker.HostConfig{
-			PublishAllPorts: true,
-		}
-		err = client.StartContainer(c.ID, startConf)
+	for _, c := range containers {
+		imgDetail, err := client.InspectImage(c.id())
 		if err != nil {
 			panic(err)
 		}
-		m.ids = append(m.ids, c.ID)
-		t.Logf("Started container %s:%s\n", target, c.ID)
+		fmt.Printf("Ports! %+v\n", imgDetail.Config.ExposedPorts)
+		fmt.Printf("Container Ports! %+v\n", imgDetail.ContainerConfig.ExposedPorts)
+		req := docker.CreateContainerOptions{
+			Config: &docker.Config{
+				Image: c.id(),
+			},
+		}
+		dockerC, err := client.CreateContainer(req)
+		if err != nil {
+			t.Fatalf("Failed to start container %s", c.id())
+		}
+
+		startConf := &docker.HostConfig{
+			PortBindings: make(map[docker.Port][]docker.PortBinding),
+		}
+		for port := range imgDetail.Config.ExposedPorts {
+			startConf.PortBindings[port] = []docker.PortBinding{docker.PortBinding{HostPort: port.Port()}}
+		}
+
+		err = client.StartContainer(dockerC.ID, startConf)
+		if err != nil {
+			panic(err)
+		}
+		m.ids = append(m.ids, dockerC.ID)
+		t.Logf("Started container %s:%s\n", c.id(), dockerC.ID)
 	}
 
 	return &m
@@ -95,6 +134,7 @@ func getLocalContainers() (map[string]bool, error) {
 	imgMap := make(map[string]bool)
 	for _, img := range imgs {
 		for _, tag := range img.RepoTags {
+			//			fmt.Printf("Tag %s\n:", tag)
 			imgMap[tag] = true
 		}
 	}
