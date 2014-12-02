@@ -2,10 +2,13 @@ package itt
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fsouza/go-dockerclient"
 )
@@ -27,28 +30,34 @@ func init() {
 }
 
 type Container struct {
-	Image        string
-	Tag          string
-	PortBindings []string // e.g. 8000:8000. If empty exposes all
-	Init         func() error
+	Name         string
+	PortBindings []string      // e.g. 8000:8000. If empty exposes all
+	Init         func() error  // Function to run after the container is started and the Delay has passed
+	Delay        time.Duration // Length of time to wait before the container is considered ready for use
+	RandomPorts  bool          // True to map exposed ports to randomized ports
+
+	image string
+	tag   string
 }
 
 func (c *Container) id() string {
-	return fmt.Sprintf("%s:%s", c.Image, c.Tag)
+	return fmt.Sprintf("%s:%s", c.image, c.tag)
 }
 
 func WithContainers(t *testing.T, names ...string) *Manager {
-	fmt.Printf("Num names %d", len(names))
 	var containers []Container
 	for _, name := range names {
-
-		c := Container{}
+		c := Container{
+			Name:        name,
+			Delay:       time.Duration(time.Millisecond * 200),
+			RandomPorts: true,
+		}
 		parts := strings.Split(name, ":")
-		c.Image = parts[0]
+		c.image = parts[0]
 		if len(parts) > 1 {
-			c.Tag = parts[1]
+			c.tag = parts[1]
 		} else {
-			c.Tag = "latest"
+			c.tag = "latest"
 		}
 		containers = append(containers, c)
 	}
@@ -56,14 +65,14 @@ func WithContainers(t *testing.T, names ...string) *Manager {
 }
 
 func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
-	fmt.Printf("Num containers %d", len(containers))
-	m := Manager{}
+	m := Manager{
+		t:            t,
+		PortMappings: make(map[string]string),
+	}
 
 	wg := sync.WaitGroup{}
 	pulled := false
 	for _, loopC := range containers {
-		fmt.Printf("Id %s\n", loopC.id())
-
 		if have := pulledContainers[loopC.id()]; !have {
 			wg.Add(1)
 			pulled = true
@@ -71,9 +80,9 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 				defer wg.Done()
 				t.Logf("Pulling %s\n", c.id())
 				req := docker.PullImageOptions{
-					Repository:   c.Image,
+					Repository:   c.image,
+					Tag:          c.tag,
 					OutputStream: os.Stdout,
-					Tag:          c.Tag,
 				}
 				err := client.PullImage(req, docker.AuthConfiguration{})
 				if err != nil {
@@ -96,8 +105,7 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("Ports! %+v\n", imgDetail.Config.ExposedPorts)
-		fmt.Printf("Container Ports! %+v\n", imgDetail.ContainerConfig.ExposedPorts)
+
 		req := docker.CreateContainerOptions{
 			Config: &docker.Config{
 				Image: c.id(),
@@ -112,7 +120,12 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 			PortBindings: make(map[docker.Port][]docker.PortBinding),
 		}
 		for port := range imgDetail.Config.ExposedPorts {
-			startConf.PortBindings[port] = []docker.PortBinding{docker.PortBinding{HostPort: port.Port()}}
+			hostPort := port.Port()
+			if c.RandomPorts {
+				hostPort = randomPort()
+			}
+			m.PortMappings[port.Port()] = hostPort
+			startConf.PortBindings[port] = []docker.PortBinding{docker.PortBinding{HostPort: hostPort}}
 		}
 
 		err = client.StartContainer(dockerC.ID, startConf)
@@ -121,8 +134,10 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 		}
 		m.ids = append(m.ids, dockerC.ID)
 		t.Logf("Started container %s:%s\n", c.id(), dockerC.ID)
+
 	}
 
+	time.Sleep(time.Millisecond * 1000)
 	return &m
 }
 
@@ -139,4 +154,10 @@ func getLocalContainers() (map[string]bool, error) {
 		}
 	}
 	return imgMap, nil
+}
+
+func randomPort() string {
+	min := 1024
+	max := 65535
+	return strconv.Itoa(rand.Intn(max-min) + min)
 }
