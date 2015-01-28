@@ -31,7 +31,10 @@ func (m *Manager) FailNow() {
 	m.t.FailNow()
 }
 func (m *Manager) Close() {
-	m.t.Logf("Starting close on %d containers\n", len(m.ids))
+	if r := recover(); r != nil {
+		m.t.Logf("Recovered in close %s", r)
+	}
+	//m.t.Logf("Starting close on %d containers\n", len(m.ids))
 	for _, id := range m.ids {
 		err := client.KillContainer(docker.KillContainerOptions{ID: id})
 		if err != nil {

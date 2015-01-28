@@ -41,7 +41,20 @@ type Container struct {
 }
 
 func (c *Container) id() string {
+	if c.image == "" {
+		c.parseName()
+	}
 	return fmt.Sprintf("%s:%s", c.image, c.tag)
+}
+
+func (c *Container) parseName() {
+	parts := strings.Split(c.Name, ":")
+	c.image = parts[0]
+	if len(parts) > 1 {
+		c.tag = parts[1]
+	} else {
+		c.tag = "latest"
+	}
 }
 
 func WithContainers(t *testing.T, names ...string) *Manager {
@@ -52,13 +65,7 @@ func WithContainers(t *testing.T, names ...string) *Manager {
 			Delay:       time.Duration(time.Millisecond * 200),
 			RandomPorts: true,
 		}
-		parts := strings.Split(name, ":")
-		c.image = parts[0]
-		if len(parts) > 1 {
-			c.tag = parts[1]
-		} else {
-			c.tag = "latest"
-		}
+		c.parseName()
 		containers = append(containers, c)
 	}
 	return WithContainerCfgs(t, containers...)
@@ -100,10 +107,11 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 		pulledContainers = newContainers
 	}
 
+	maxDuration := time.Duration(0)
 	for _, c := range containers {
 		imgDetail, err := client.InspectImage(c.id())
 		if err != nil {
-			panic(err)
+			t.Fatalf("Bad img %s", c.id())
 		}
 
 		req := docker.CreateContainerOptions{
@@ -111,11 +119,13 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 				Image: c.id(),
 			},
 		}
+
 		dockerC, err := client.CreateContainer(req)
 		if err != nil {
-			t.Fatalf("Failed to start container %s", c.id())
+			t.Fatalf("Failed to start container %s - %s", c.id(), dockerC.ID)
+		} else {
+			t.Logf("Created containers %s - %s", c.id(), dockerC.ID)
 		}
-
 		startConf := &docker.HostConfig{
 			PortBindings: make(map[docker.Port][]docker.PortBinding),
 		}
@@ -130,14 +140,18 @@ func WithContainerCfgs(t *testing.T, containers ...Container) *Manager {
 
 		err = client.StartContainer(dockerC.ID, startConf)
 		if err != nil {
-			panic(err)
+			client.KillContainer(docker.KillContainerOptions{ID: dockerC.ID})
+			t.Fatal(err)
+		}
+		if c.Delay > maxDuration {
+			maxDuration = c.Delay
 		}
 		m.ids = append(m.ids, dockerC.ID)
 		t.Logf("Started container %s:%s\n", c.id(), dockerC.ID)
 
 	}
 
-	time.Sleep(time.Millisecond * 1000)
+	time.Sleep(maxDuration)
 	return &m
 }
 
@@ -149,13 +163,19 @@ func getLocalContainers() (map[string]bool, error) {
 	imgMap := make(map[string]bool)
 	for _, img := range imgs {
 		for _, tag := range img.RepoTags {
-			//			fmt.Printf("Tag %s\n:", tag)
 			imgMap[tag] = true
 		}
 	}
 	return imgMap, nil
 }
 
+func DumpRunning(t *testing.T) {
+	opts := docker.ListContainersOptions{}
+	conts, _ := client.ListContainers(opts)
+	for _, ct := range conts {
+		t.Logf("Running %+v\n", ct)
+	}
+}
 func randomPort() string {
 	min := 1024
 	max := 65535
