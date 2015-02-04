@@ -31,7 +31,9 @@ func (m *Manager) FailNow() {
 	m.t.FailNow()
 }
 func (m *Manager) Close() {
+	var recovered interface{}
 	if r := recover(); r != nil {
+		recovered = r
 		m.t.Logf("Recovered in close %s", r)
 	}
 	//m.t.Logf("Starting close on %d containers\n", len(m.ids))
@@ -40,6 +42,9 @@ func (m *Manager) Close() {
 		if err != nil {
 			m.t.Error(err)
 		}
+	}
+	if recovered != nil {
+		panic(recovered)
 	}
 }
 func (m *Manager) Write(p []byte) (int, error) {
